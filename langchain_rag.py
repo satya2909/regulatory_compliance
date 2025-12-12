@@ -1,83 +1,215 @@
 # langchain_rag.py
 """
-Small LangChain wrapper to run a RetrievalQA chain over your vector store.
-This file expects one of your stores (store_persistent.DocStorePersistent or store_faiss.FaissStore)
-to expose `chunk_texts`+`embeddings` (for persistent) or to expose search() (for Faiss store).
-We provide two helper adapters below:
- - build_vectorstore_from_persistent: builds a LangChain FAISS vectorstore from persisted texts+embeddings
- - build_chain_from_faiss_store: builds a RetrievalQA chain that queries your FaissStore.search() method
+LangChain RAG helper for the RegTech skeleton.
+
+Features:
+- Builds a LangChain FAISS vectorstore from your store's texts (uses HuggingFaceEmbeddings).
+- Creates a RetrievalQA chain (LangChain) and runs queries, returning:
+    { "answer": <str>, "source_documents": [ {page_content, metadata}, ... ] }
+
+Usage (example):
+    from store_persistent import DocStorePersistent
+    from langchain_rag import RAGRunner
+
+    store = DocStorePersistent()
+    runner = RAGRunner(store)
+    out = runner.run(question="What are the KYC requirements?", top_k=6)
+    print(out["answer"])
+    print(out["source_documents"])
 """
 
-from langchain.chains import RetrievalQA
-from langchain.prompts import PromptTemplate
-from langchain.vectorstores import FAISS
-from langchain.embeddings import HuggingFaceEmbeddings
-from langchain.llms import OpenAI        # optional: swap with other LLM wrappers
-import numpy as np
+from typing import Optional, List, Dict, Any
+import os
 
-# Choose the same sentence-transformers model used elsewhere
+# LangChain imports
+try:
+    from langchain.chains import RetrievalQA
+    from langchain.prompts import PromptTemplate
+    from langchain.vectorstores import FAISS
+    from langchain.embeddings import HuggingFaceEmbeddings
+    # For LLM: prefer ChatOpenAI, fallback to OpenAI wrapper
+    try:
+        from langchain.chat_models import ChatOpenAI
+    except Exception:
+        from langchain.llms import OpenAI as ChatOpenAI  # type: ignore
+except Exception as e:
+    raise ImportError("Please install langchain and its dependencies. pip install langchain") from e
+
+# Default HF embedding model (should match your sentence-transformers model family)
 HF_EMBEDDING_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
 
-# Default prompt (keeps it grounded + asks for citations)
-_DEFAULT_PROMPT = """You are a regulatory compliance assistant. Use ONLY the provided context to answer the user's question.
-Cite sources inline in the form [title | chunk_id]. If information is not present in the context, respond: "No supporting text found in the provided documents."
+# Default prompt template for grounded answers
+_PROMPT_TEMPLATE = """You are a regulatory compliance assistant. Use ONLY the provided context below to answer the user's question.
+Cite sources inline using the form [title | chunk_id]. If the information is not present in the context, say "No supporting text found in the provided documents."
 
-Context:
+CONTEXT:
 {context}
 
 Question: {question}
 
 Answer:"""
 
-prompt = PromptTemplate(template=_DEFAULT_PROMPT, input_variables=["context", "question"])
+_prompt = PromptTemplate(template=_PROMPT_TEMPLATE, input_variables=["context", "question"])
 
-def build_vectorstore_from_persistent(persistent_store):
+
+class _FallbackLLM:
+    """Simple fallback 'LLM' used when no cloud LLM is configured.
+    It returns the concatenated context (so responses remain grounded and non-hallucinated).
     """
-    Given an instance of DocStorePersistent (store_persistent.DocStorePersistent),
-    build a LangChain FAISS vectorstore. This will wrap embeddings/texts so LangChain can use them.
+
+    def __init__(self, notice: str = "[LLM not configured — returning concatenated context]"):
+        self.notice = notice
+
+    def __call__(self, prompt: str, **kwargs):
+        # attempt to extract the CONTEXT block like in the prompt template
+        marker = "CONTEXT:"
+        if marker in prompt:
+            try:
+                ctx = prompt.split(marker, 1)[1].split("Question:", 1)[0].strip()
+                return f"{self.notice}\\n\\n{ctx}"
+            except Exception:
+                pass
+        return self.notice + " (context not found)"
+
+
+class RAGRunner:
     """
-    # Use HuggingFaceEmbeddings wrapper (same model family)
-    hf = HuggingFaceEmbeddings(model_name=HF_EMBEDDING_MODEL)
-
-    # persistent_store.chunk_texts -> list[str]
-    texts = persistent_store.chunk_texts
-    if not texts:
-        # empty store
-        return None
-
-    # FAISS.from_texts will call embeddings internally; but to avoid recomputing we can pass embeddings
-    # If persistent_store has numpy embeddings matching SentenceTransformer dims, convert to list
-    if hasattr(persistent_store, "embeddings") and persistent_store.embeddings is not None:
-        # Convert stored numpy embeddings into the vectorstore directly (FAISS.from_texts doesn't accept precomputed embeddings easily)
-        # Simpler: use FAISS.from_texts which will compute embeddings using HF wrapper
-        vect = FAISS.from_texts(texts, hf)
-    else:
-        vect = FAISS.from_texts(texts, hf)
-    return vect
-
-
-def build_chain_using_vectorstore(vectorstore, llm=None, chain_type="stuff"):
+    RAGRunner wraps:
+      - building a LangChain FAISS vectorstore from a store (store must expose chunk_texts or list_documents)
+      - creating a RetrievalQA chain with an LLM (OpenAI by default if OPENAI_API_KEY present)
+      - running queries and returning results with source_documents
     """
-    Given a LangChain vectorstore, return a RetrievalQA chain.
-    - llm: pass a LangChain-compatible LLM (e.g., OpenAI(...)) or leave None to instantiate a default.
-    """
-    if llm is None:
-        # Default LLM: OpenAI text model (requires OPENAI_API_KEY env var). Replace with other LLM if you want.
-        llm = OpenAI(temperature=0.0, max_tokens=512)
-    retriever = vectorstore.as_retriever(search_type="similarity", search_kwargs={"k":6})
-    qa = RetrievalQA.from_chain_type(llm=llm, chain_type=chain_type, retriever=retriever, return_source_documents=True)
-    return qa
 
+    def __init__(self, store, hf_embedding_model: str = HF_EMBEDDING_MODEL):
+        """
+        store: your store object (store_persistent.DocStorePersistent or store_faiss.FaissStore or similar).
+               It must expose:
+                 - attribute `chunk_texts` (list[str]) OR a method `list_documents()` + `get_document(doc_id)`
+               and optionally:
+                 - attribute `chunk_metadata` / chunk ids in the stored doc chunks for better citations.
+        """
+        self.store = store
+        self.hf_embedding_model = hf_embedding_model
+        # cache vectorstore once built
+        self._vectorstore = None
 
-def run_rag_query_from_persistent(persistent_store, question, llm=None):
-    """
-    End-to-end helper: build vectorstore from persistent store and run RetrievalQA for the question.
-    Returns dict: {'answer': ..., 'source_documents': [...]}
-    """
-    vect = build_vectorstore_from_persistent(persistent_store)
-    if vect is None:
-        return {"answer": "No documents indexed.", "sources": []}
-    qa = build_chain_using_vectorstore(vect, llm=llm)
-    res = qa({"query": question})
-    # res contains 'result' and 'source_documents' keys
-    return {"answer": res.get("result"), "source_documents": [{"page_content": d.page_content, "metadata": getattr(d, "metadata", {})} for d in res.get("source_documents", [])]}
+    def _build_vectorstore_from_store(self):
+        """
+        Build a LangChain FAISS vectorstore from store.chunk_texts (recomputes embeddings using HuggingFaceEmbeddings).
+        For small/medium datasets this is fine; for very large datasets consider constructing FAISS directly from precomputed embeddings.
+        """
+        if self._vectorstore is not None:
+            return self._vectorstore
+
+        # Try to obtain texts
+        texts: List[str] = []
+        metadatas: List[Dict[str, Any]] = []
+        # Preferred: store exposes chunk_texts list (simple)
+        if hasattr(self.store, "chunk_texts") and isinstance(self.store.chunk_texts, list) and len(self.store.chunk_texts) > 0:
+            texts = list(self.store.chunk_texts)
+            # Try to construct minimal metadata: if store has chunk_index or docs mapping, attach doc_id/chunk_id
+            if hasattr(self.store, "chunk_index"):
+                for i, pair in enumerate(self.store.chunk_index):
+                    meta = {}
+                    try:
+                        doc_id, chunk_id = pair
+                        meta = {"doc_id": doc_id, "chunk_id": chunk_id}
+                    except Exception:
+                        meta = {"idx": i}
+                    metadatas.append(meta)
+        else:
+            # fallback: iterate documents and collect their chunks
+            if hasattr(self.store, "list_documents"):
+                for d in self.store.list_documents():
+                    doc_id = d.get("doc_id")
+                    doc = self.store.get_document(doc_id)
+                    if not doc or "chunks" not in doc:
+                        continue
+                    for c in doc["chunks"]:
+                        texts.append(c.get("text", ""))
+                        # build metadata from chunk fields if present
+                        meta = {
+                            "doc_id": doc_id,
+                            "title": doc.get("title"),
+                            "chunk_id": c.get("chunk_id"),
+                            "page": c.get("page")
+                        }
+                        metadatas.append(meta)
+
+        if not texts:
+            # nothing to index
+            self._vectorstore = None
+            return None
+
+        # Build LangChain HuggingFaceEmbeddings (wrapper uses sentence-transformers under the hood)
+        hf = HuggingFaceEmbeddings(model_name=self.hf_embedding_model)
+
+        # Create FAISS vectorstore from texts and metadata
+        # This will compute embeddings via hf and build a FAISS index internally.
+        # For small demos it's fine; if you already have precomputed embeddings, see advanced path (not implemented here).
+        self._vectorstore = FAISS.from_texts(texts, hf, metadatas=metadatas)
+        return self._vectorstore
+
+    def _get_llm(self, temperature: float = 0.0):
+        """
+        Choose an LLM for the chain:
+        - If OPENAI_API_KEY is set, use ChatOpenAI via LangChain (recommended for cloud)
+        - Otherwise return a simple fallback LLM wrapper that returns concatenated context (safe)
+        """
+        openai_key = os.environ.get("OPENAI_API_KEY", "") or os.environ.get("OPENAI_API_KEY".lower(), "")
+        if openai_key:
+            # Prefer ChatOpenAI if available
+            try:
+                # ChatOpenAI uses chat-capable models; ensure temperature low for factual answers
+                return ChatOpenAI(temperature=temperature)
+            except Exception:
+                # fallback to any OpenAI wrapper
+                from langchain.llms import OpenAI
+                return OpenAI(temperature=temperature)
+        # no cloud key -> return fallback deterministic LLM
+        return _FallbackLLM()
+
+    def run(self, question: str, top_k: int = 6, return_source_documents: bool = True) -> Dict[str, Any]:
+        """
+        Run the RetrievalQA chain:
+        Returns:
+            {
+                "answer": <str>,
+                "source_documents": [ { "page_content": ..., "metadata": { ... } }, ... ],
+                "raw": <langchain raw output if any>
+            }
+        """
+        # Build or reuse vectorstore
+        vectorstore = self._build_vectorstore_from_store()
+        if vectorstore is None:
+            return {"answer": "No documents indexed.", "source_documents": []}
+
+        # Build retriever with desired k
+        retriever = vectorstore.as_retriever(search_type="similarity", search_kwargs={"k": top_k})
+
+        # Get LLM
+        llm = self._get_llm(temperature=0.0)
+
+        # Build chain - using 'stuff' chain_type (puts context into prompt). Could use 'map_reduce' for large docs.
+        qa = RetrievalQA.from_chain_type(llm=llm, chain_type="stuff", retriever=retriever, return_source_documents=return_source_documents, chain_type_kwargs={"prompt": _prompt})
+
+        # Execute
+        res = qa({"query": question})
+        # res typically contains 'result' and 'source_documents' keys
+        answer = res.get("result") or res.get("answer") or ""
+        src_docs = res.get("source_documents") or res.get("source_documents", [])
+
+        # Normalize source_documents into plain dicts (page_content + metadata)
+        normalized_sources = []
+        for d in src_docs:
+            # LangChain's Document shape: Document(page_content=..., metadata={...})
+            try:
+                page_content = getattr(d, "page_content", None) or d.get("page_content", "")
+                metadata = getattr(d, "metadata", None) or d.get("metadata", {})
+            except Exception:
+                # fallback if it's a plain dict
+                page_content = d.get("page_content", "") if isinstance(d, dict) else str(d)
+                metadata = d.get("metadata", {}) if isinstance(d, dict) else {}
+            normalized_sources.append({"page_content": page_content, "metadata": metadata})
+
+        return {"answer": answer, "source_documents": normalized_sources, "raw": res}
