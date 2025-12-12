@@ -1,18 +1,8 @@
 # rag.py
 # LLM wrapper for RAG supporting OpenAI, Google Gemini (Generative AI), and Anthropic Claude.
 # Behavior:
-# - Use provider defined by env var LLM_PROVIDER (values: "openai", "gemini", "claude")
+# - Use provider defined by env var LLM_PROVIDER (values: "gemini", "claude")
 # - Provide deterministic grounded fallback when no API key is configured.
-#
-# Set environment:
-#   export LLM_PROVIDER="gemini"
-#   export GEMINI_API_KEY="..."      # for Google
-#   or
-#   export LLM_PROVIDER="claude"
-#   export ANTHROPIC_API_KEY="..."   # for Anthropic
-#   or
-#   export LLM_PROVIDER="openai"
-#   export OPENAI_API_KEY="..."      # for OpenAI
 #
 # Note: you must install the appropriate provider SDKs (see README below).
 
@@ -56,17 +46,8 @@ class LLMClient:
         self._claude_ready = False
 
         # lazy imports to avoid hard dependency unless used
-        if self.provider == "openai":
-            try:
-                import openai
-                openai.api_key = os.environ.get("OPENAI_API_KEY", "")
-                if openai.api_key:
-                    self.openai = openai
-                    self._openai_ready = True
-            except Exception:
-                self._openai_ready = False
 
-        elif self.provider == "gemini":
+        if self.provider == "gemini":
             # Google Generative AI (gemini) client
             # Typical install: pip install google-generative-ai
             try:
