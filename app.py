@@ -109,6 +109,7 @@ def generate_answer_with_groq(question: str, context_chunks: list[str]) -> str:
         return "LLM error. Please try again later."
 
 
+
 @app.route('/')
 def index():
     return render_template_string(INDEX_HTML)
@@ -238,6 +239,37 @@ def query():
         "results": results
     })
 
+
+@app.route("/pdf_diff", methods=["POST"])
+def pdf_diff():
+    """
+    Compare two documents and return PDF diff highlights.
+
+    JSON:
+    {
+      "old_doc_id": "...",
+      "new_doc_id": "..."
+    }
+    """
+    data = request.get_json()
+    old_id = data.get("old_doc_id")
+    new_id = data.get("new_doc_id")
+
+    old_doc = store.get_document(old_id)
+    new_doc = store.get_document(new_id)
+
+    if not old_doc or not new_doc:
+        return jsonify({"error": "Invalid doc_id(s)"}), 400
+
+    compare_result = compare_documents(old_doc, new_doc)
+    highlights = build_pdf_diff_highlights(compare_result)
+
+    return jsonify({
+        "old_doc_id": old_id,
+        "new_doc_id": new_id,
+        "summary": compare_result.get("summary"),
+        "highlights": highlights
+    })
 
 
 

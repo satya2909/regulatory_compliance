@@ -63,6 +63,7 @@ class FaissStoreRetriever(BaseRetriever):
             )
         return docs
 
+# ------------------------------------------------------------
 
 # -----------------------------
 # LLM (Groq – FREE)
@@ -95,7 +96,8 @@ def build_chain_from_store(store, top_k: int = 6):
         return_source_documents=True,
     )
 
-    return qa
+
+# ------------------------------------------------------------
 
 
 # -----------------------------
