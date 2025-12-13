@@ -7,6 +7,8 @@ from langchain_integration import build_chain_from_store, run_chain
 from cite import inject_citations
 from version_compare import compare_documents, compare_texts
 from utils import extract_text_from_file, chunk_text
+from version_compare import compare_documents
+from pdf_diff import build_pdf_diff_highlights
 
 
 app = Flask(__name__)
@@ -26,6 +28,7 @@ INDEX_HTML = """
 <p>Use /query to ask questions (POST JSON: {'question': '...'}).</p>
 <p>Use /rag_query to get LLM-backed answers (POST JSON: {'question':'...', 'top_k':6, 'threshold':0.65}).</p>
 """
+
 
 @app.route('/')
 def index():
@@ -116,6 +119,37 @@ def query():
     top_k = int(data.get('top_k', 5))
     results = store.search(question, top_k=top_k)
     return jsonify({"question": question, "results": results})
+
+@app.route("/pdf_diff", methods=["POST"])
+def pdf_diff():
+    """
+    Compare two documents and return PDF diff highlights.
+
+    JSON:
+    {
+      "old_doc_id": "...",
+      "new_doc_id": "..."
+    }
+    """
+    data = request.get_json()
+    old_id = data.get("old_doc_id")
+    new_id = data.get("new_doc_id")
+
+    old_doc = store.get_document(old_id)
+    new_doc = store.get_document(new_id)
+
+    if not old_doc or not new_doc:
+        return jsonify({"error": "Invalid doc_id(s)"}), 400
+
+    compare_result = compare_documents(old_doc, new_doc)
+    highlights = build_pdf_diff_highlights(compare_result)
+
+    return jsonify({
+        "old_doc_id": old_id,
+        "new_doc_id": new_id,
+        "summary": compare_result.get("summary"),
+        "highlights": highlights
+    })
 
 
 @app.route('/rag_query', methods=['POST'])
