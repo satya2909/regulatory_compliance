@@ -12,24 +12,38 @@ Usage:
 Notes:
 - Requires `langchain` installed.
 - By default, selects OpenAI Chat models if OPENAI_API_KEY is set. If not set, run_chain will return a grounded fallback using the retrieved context (no hallucination).
+- This module tries multiple import locations for ChatOpenAI to be resilient across LangChain packaging variants.
 """
 
 import os
 from typing import List, Dict, Any, Optional
 
-# LangChain imports
+# LangChain imports (robust across versions)
 try:
     from langchain.chains import RetrievalQA
     from langchain.prompts import PromptTemplate
     from langchain.schema import Document
-    # LLM wrappers
+    # Prefer ChatOpenAI from langchain.chat_models, fallback to langchain_openai or classic OpenAI
     try:
         from langchain.chat_models import ChatOpenAI
     except Exception:
-        from langchain.llms import OpenAI as ChatOpenAI  # type: ignore
-    from langchain.base_language import BaseLanguageModel
+        try:
+            # some installations provide a separate package `langchain-openai`
+            from langchain_openai.chat_models import ChatOpenAI  # type: ignore
+        except Exception:
+            # final fallback: classic OpenAI wrapper
+            from langchain.llms import OpenAI as ChatOpenAI  # type: ignore
+    # BaseLanguageModel for typing
+    try:
+        from langchain.base_language import BaseLanguageModel
+    except Exception:
+        # older/newer versions might have alternate path
+        from langchain.schema import BaseLanguageModel  # type: ignore
 except Exception as e:
-    raise ImportError("Please install langchain (pip install langchain).") from e
+    raise ImportError(
+        "Please install langchain and the OpenAI integration (pip install langchain langchain-openai) "
+        "or check your langchain installation."
+    ) from e
 
 # Default prompt
 _PROMPT_TEMPLATE = """You are a regulatory compliance assistant. Use ONLY the provided context below to answer the user's question.
@@ -81,7 +95,7 @@ class StoreRetriever:
                 metadata = h["metadata"]
             else:
                 # attach store-level metadata if present
-                for k in ("doc_id", "chunk_id", "title", "score"):
+                for k in ("doc_id", "chunk_id", "title", "score", "page", "section"):
                     if k in h:
                         metadata[k] = h[k]
             docs.append(Document(page_content=page_content, metadata=metadata))
@@ -96,15 +110,17 @@ def _get_default_llm(temperature: float = 0.0) -> Optional[BaseLanguageModel]:
     """
     Return a LangChain LLM if environment configured (OpenAI), otherwise None.
     """
-    openai_key = os.environ.get("OPENAI_API_KEY", "")
+    openai_key = os.environ.get("OPENAI_API_KEY", "") or os.environ.get("OPENAI_API_KEY".lower(), "")
     if openai_key:
         try:
             # ChatOpenAI wrapper will pick model via OPENAI_API_KEY / env or default
             return ChatOpenAI(temperature=temperature)
         except Exception:
-            # fallback to plain OpenAI LLM
-            from langchain.llms import OpenAI
-            return OpenAI(temperature=temperature)
+            try:
+                from langchain.llms import OpenAI
+                return OpenAI(temperature=temperature)
+            except Exception:
+                return None
     return None
 
 
@@ -124,6 +140,7 @@ def build_chain_from_store(store, llm: Optional[BaseLanguageModel] = None, top_k
         return {"chain": None, "retriever": retriever, "llm": None}
 
     # Build RetrievalQA with our retriever. We use 'stuff' chain type (puts retrieved docs directly into prompt).
+    # Note: chain_type_kwargs accepts a 'prompt' in many LangChain versions; keep as dict wrapper.
     qa = RetrievalQA.from_chain_type(llm=llm, chain_type="stuff", retriever=retriever, return_source_documents=True, chain_type_kwargs={"prompt": prompt_template})
     return {"chain": qa, "retriever": retriever, "llm": llm}
 
@@ -168,8 +185,8 @@ def run_chain(chain_obj: Dict[str, Any], question: str, top_k: Optional[int] = N
         return {"answer": answer, "source_documents": srcs, "grounded_fallback": True}
 
     # We have a chain: run it (LangChain chain expects {"query": question})
+    # Depending on LangChain version, RetrievalQA returns either 'result' or 'answer' as the top-level key.
     res = qa({"query": question})
-    # LangChain RetrievalQA returns keys: 'result' or 'answer' and 'source_documents'
     answer = res.get("result") or res.get("answer") or ""
     source_documents = res.get("source_documents") or res.get("source_documents", []) or []
     # normalize to list of dicts
