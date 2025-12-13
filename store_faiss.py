@@ -49,6 +49,22 @@ class FaissStore:
         self._ensure_model()
         # try loading existing index & metadata
         self.load()
+        from langchain.vectorstores import FAISS
+        from langchain.embeddings.base import Embeddings
+
+        def as_langchain_vectorstore(self, embedding_model: Embeddings):
+            return FAISS(
+                embedding_function=embedding_model,
+                index=self.index,
+                docstore=self.docstore,
+                index_to_docstore_id=self.index_to_docstore_id,
+            )
+        def get_retriever(self):
+            """
+            Returns a LangChain-compatible retriever
+            """
+            return self.vectorstore.as_retriever()
+
 
     def _ensure_model(self):
         if self._model is None:

@@ -16,26 +16,22 @@ Usage:
 
 import os
 from typing import List, Dict, Any, Optional
+# from store_faiss import FaissStore
 
-<<<<<<< HEAD
-# ---- LangChain imports (latest stable paths) ----
-from langchain.chains import RetrievalQA
-from langchain.prompts import PromptTemplate
-from langchain.schema import Document, BaseRetriever
-from langchain_google_genai import ChatGoogleGenerativeAI
-=======
 # LangChain imports (robust across versions)
 try:
     from langchain.chains.retrieval_qa.base import RetrievalQA
     from langchain.prompts import PromptTemplate
-    from langchain.schema import Document
+    # from langchain.retrievers.base import BaseRetriever
+    from langchain.schema import BaseRetriever,Document
+
     # Prefer ChatOpenAI from langchain.chat_models, fallback to langchain_openai or classic OpenAI
     try:
-        from langchain.chat_models import ChatOpenAI
+        from langchain_google_genai import ChatGoogleGenerativeAI
     except Exception:
         try:
             # some installations provide a separate package `langchain-openai`
-            from langchain_openai.chat_models import ChatOpenAI  # type: ignore
+            from langchain_google_genai import ChatGoogleGenerativeAI  # type: ignore
         except Exception:
             # final fallback: classic OpenAI wrapper
             from langchain.llms import OpenAI as ChatOpenAI  # type: ignore
@@ -50,7 +46,6 @@ except Exception as e:
         "Please install langchain and the OpenAI integration (pip install langchain langchain-openai) "
         "or check your langchain installation."
     ) from e
->>>>>>> c8bf6af5d1e8cc12d6f578b02456f54f40e8276e
 
 # ------------------------------------------------
 
@@ -115,9 +110,52 @@ class StoreRetriever(BaseRetriever):
     async def aget_relevant_documents(self, query: str) -> List[Document]:
         return self.get_relevant_documents(query)
 
+import os
+import google.generativeai as genai
+from langchain.llms.base import LLM
+from typing import List
+from langchain.schema import BaseRetriever,Document
+# from langchain.retrievers import BaseRetriever
+
+class FaissStoreRetriever(BaseRetriever):
+    store: object
+    k: int = 5
+
+    def _get_relevant_documents(self, query: str) -> List[Document]:
+        results = self.store.search(query, top_k=self.k)
+
+        docs = []
+        for r in results:
+            docs.append(
+                Document(
+                    page_content=r["text"],
+                    metadata={
+                        "doc_id": r["doc_id"],
+                        "title": r.get("title", ""),
+                        "chunk_id": r.get("chunk_id"),
+                        "score": r.get("score"),
+                    },
+                )
+            )
+        return docs
 
 # ------------------------------------------------------------
 
+class GeminiLLM(LLM):
+    temperature: float = 0.0
+
+    @property
+    def _llm_type(self):
+        return "gemini"
+
+    def _call(self, prompt, stop=None):
+        model = genai.GenerativeModel("gemini-pro")
+        response = model.generate_content(prompt)
+        return response.text
+
+def _get_default_llm(temperature=0.0):
+    genai.configure(api_key=os.environ["GEMINI_API_KEY"])
+    return GeminiLLM(temperature=temperature)
 
 def _get_gemini_llm(temperature: float = 0.0) -> Optional[ChatGoogleGenerativeAI]:
     """
