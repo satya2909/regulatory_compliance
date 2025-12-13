@@ -20,7 +20,7 @@ from typing import List, Dict, Any, Optional
 
 # LangChain imports (robust across versions)
 try:
-    from langchain.chains import RetrievalQA
+    from langchain.chains.retrieval_qa.base import RetrievalQA
     from langchain.prompts import PromptTemplate
     from langchain.schema import Document
     # Prefer ChatOpenAI from langchain.chat_models, fallback to langchain_openai or classic OpenAI
