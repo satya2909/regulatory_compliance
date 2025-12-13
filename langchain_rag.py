@@ -29,9 +29,9 @@ try:
     from langchain.embeddings import HuggingFaceEmbeddings
     # For LLM: prefer ChatOpenAI, fallback to OpenAI wrapper
     try:
-        from langchain.chat_models import ChatOpenAI
+        from langchain_google_genai import ChatGoogleGenerativeAI
     except Exception:
-        from langchain.llms import OpenAI as ChatOpenAI  # type: ignore
+        from langchain_google_genai import ChatGoogleGenerativeAI  # type: ignore
 except Exception as e:
     raise ImportError("Please install langchain and its dependencies. pip install langchain") from e
 
@@ -151,23 +151,16 @@ class RAGRunner:
         return self._vectorstore
 
     def _get_llm(self, temperature: float = 0.0):
-        """
-        Choose an LLM for the chain:
-        - If OPENAI_API_KEY is set, use ChatOpenAI via LangChain (recommended for cloud)
-        - Otherwise return a simple fallback LLM wrapper that returns concatenated context (safe)
-        """
-        openai_key = os.environ.get("OPENAI_API_KEY", "") or os.environ.get("OPENAI_API_KEY".lower(), "")
-        if openai_key:
-            # Prefer ChatOpenAI if available
-            try:
-                # ChatOpenAI uses chat-capable models; ensure temperature low for factual answers
-                return ChatOpenAI(temperature=temperature)
-            except Exception:
-                # fallback to any OpenAI wrapper
-                from langchain.llms import OpenAI
-                return OpenAI(temperature=temperature)
-        # no cloud key -> return fallback deterministic LLM
-        return _FallbackLLM()
+        gemini_key = os.environ.get("GEMINI_API_KEY", "")
+        if not gemini_key:
+            raise RuntimeError("GEMINI_API_KEY not set")
+
+        return ChatGoogleGenerativeAI(
+            model="gemini-pro",
+            temperature=temperature,
+            google_api_key=gemini_key
+        )
+
 
     def run(self, question: str, top_k: int = 6, return_source_documents: bool = True) -> Dict[str, Any]:
         """
