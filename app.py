@@ -1,8 +1,8 @@
 # app.py — LangChain full integration + citation injection
 from flask import Flask, request, jsonify, render_template_string
+from flask_cors import CORS
 import os
 import requests
-import google.generativeai as genai
 # from openai import OpenAI
 from pdf_diff import build_pdf_diff_highlights
 from utils import extract_text_from_file
@@ -12,12 +12,14 @@ from cite import inject_citations
 from version_compare import compare_documents, compare_texts
 from utils import extract_text_from_file, chunk_text
 from langchain_groq import ChatGroq
+import re
 
 
 retriever = None
 
 
 app = Flask(__name__)
+CORS(app, origins=['http://localhost:5173'])
 
 # Initialize store and LangChain chain object (retriever uses store.search)
 store = FaissStore()
@@ -54,29 +56,63 @@ def get_unique_texts(results):
 
     return unique_texts
 
-# from openai import OpenAI
-# import os
 llm = ChatGroq(
     model="llama-3.3-70b-versatile",
     temperature=0.0,
     groq_api_key=os.environ.get("GROQ_API_KEY")
 )
 
+BLOCKED_PATTERNS = [
+    r"ignore previous instructions",
+    r"you are now",
+    r"act as",
+    r"system prompt",
+]
 
-# client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-# HF_API_KEY = os.getenv("HUGGINGFACE_API_KEY")
-# import os
-# import requests
-# from flask import request, jsonify
+def input_guardrail(user_query: str):
+    query_lower = user_query.lower()
+    for pattern in BLOCKED_PATTERNS:
+        if re.search(pattern, query_lower):
+            raise ValueError("Potential prompt injection detected.")
+    
+    if len(user_query) > 500:
+        raise ValueError("Query too long.")
 
-# HF_API_URL = "https://api-inference.huggingface.co/models/mistralai/Mistral-7B-Instruct-v0.2"
-# HF_HEADERS = {
-#     "Authorization": f"Bearer {os.getenv('HF_API_TOKEN')}",
-#     "Content-Type": "application/json"
-# }
+def retrieval_guardrail(docs, min_score=0.5):
+    if not docs:
+        raise ValueError("No relevant documents found.")
+
+    filtered_docs = [d for d in docs if d.metadata["score"] >= min_score]
+
+    if not filtered_docs:
+        raise ValueError("Low-confidence retrieval. Cannot answer reliably.")
+
+    return filtered_docs
+
+def hallucination_guardrail(answer, context):
+    for sentence in answer.split("."):
+        if sentence.strip() and sentence not in context:
+            return False
+    return True
+
+def context_guardrail(context_chunks):
+    if not context_chunks or len(context_chunks) == 0:
+        return False
+
+    total_text = " ".join(context_chunks)
+    if len(total_text.strip()) < 200:
+        return False
+
+    return True
+
 
 def generate_answer_with_groq(question: str, context_chunks: list[str]) -> str:
     try:
+        input_guardrail(question)
+
+        if not context_guardrail(context_chunks):
+            return "Not found in the provided document - app.py."
+
         context_text = "\n\n".join(context_chunks)
 
         prompt = f"""
@@ -115,7 +151,6 @@ def generate_answer_with_groq(question: str, context_chunks: list[str]) -> str:
 def index():
     return render_template_string(INDEX_HTML)
 
-# New endpoint
 @app.route('/compare_versions', methods=['POST'])
 def compare_versions():
     """

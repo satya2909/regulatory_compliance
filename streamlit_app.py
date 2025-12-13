@@ -15,7 +15,7 @@ st.set_page_config(
 # -----------------------------
 BACKEND_URL = (
     os.environ.get("BACKEND_URL")
-    or st.secrets.get("BACKEND_URL", "http://192.168.144.223:7860/")
+    or st.secrets.get("BACKEND_URL", "http://192.168.144.186:7860/")
 )
 
 # -----------------------------
