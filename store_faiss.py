@@ -19,6 +19,8 @@ from typing import List, Dict, Tuple
 import numpy as np
 from sentence_transformers import SentenceTransformer
 import faiss
+from langchain_community.vectorstores import FAISS
+
 
 # Default settings
 _EMBEDDING_MODEL_NAME = "all-MiniLM-L6-v2"

@@ -1,14 +1,19 @@
 # app.py — LangChain full integration + citation injection
 from flask import Flask, request, jsonify, render_template_string
 import os
+import requests
+import google.generativeai as genai
+# from openai import OpenAI
 from utils import extract_text_from_file
 from store_faiss import FaissStore
 from langchain_integration import build_chain_from_store, run_chain
 from cite import inject_citations
 from version_compare import compare_documents, compare_texts
 from utils import extract_text_from_file, chunk_text
-from version_compare import compare_documents
-from pdf_diff import build_pdf_diff_highlights
+from langchain_groq import ChatGroq
+
+
+retriever = None
 
 
 app = Flask(__name__)
@@ -28,6 +33,81 @@ INDEX_HTML = """
 <p>Use /query to ask questions (POST JSON: {'question': '...'}).</p>
 <p>Use /rag_query to get LLM-backed answers (POST JSON: {'question':'...', 'top_k':6, 'threshold':0.65}).</p>
 """
+# model = genai.GenerativeModel("models/gemini-2.5-flash")
+# genai.configure(api_key=os.environ.get("GEMINI_API_KEY"))
+# client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+
+def get_unique_texts(results):
+    seen = set()
+    unique_texts = []
+
+    for r in results:
+        text = r["text"].strip()
+
+        # normalize whitespace
+        text_norm = " ".join(text.split())
+
+        if text_norm not in seen:
+            seen.add(text_norm)
+            unique_texts.append(text)
+
+    return unique_texts
+
+# from openai import OpenAI
+# import os
+llm = ChatGroq(
+    model="llama-3.3-70b-versatile",
+    temperature=0.0,
+    groq_api_key=os.environ.get("GROQ_API_KEY")
+)
+
+
+# client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+# HF_API_KEY = os.getenv("HUGGINGFACE_API_KEY")
+# import os
+# import requests
+# from flask import request, jsonify
+
+# HF_API_URL = "https://api-inference.huggingface.co/models/mistralai/Mistral-7B-Instruct-v0.2"
+# HF_HEADERS = {
+#     "Authorization": f"Bearer {os.getenv('HF_API_TOKEN')}",
+#     "Content-Type": "application/json"
+# }
+
+def generate_answer_with_groq(question: str, context_chunks: list[str]) -> str:
+    try:
+        context_text = "\n\n".join(context_chunks)
+
+        prompt = f"""
+        You are a regulatory compliance assistant.
+
+        Answer the question using the provided context.
+        The wording in the document may differ from the question.
+        If the information is clearly implied or explicitly stated, answer YES/NO and explain briefly.
+
+        If the information is truly absent, say:
+        "Not found in the provided document - app.py."
+
+        Document Context:
+        {context_text}
+
+        Question:
+        {question}
+
+        Answer:
+        """
+
+        response = llm.invoke(prompt)
+
+        if not response or not response.content:
+            return "Not found in the document."
+
+        return response.content.strip()
+
+    except Exception as e:
+        print("Groq error:", e)
+        return "LLM error. Please try again later."
+
 
 
 @app.route('/')
@@ -81,20 +161,24 @@ def compare_versions():
 
 @app.route('/upload', methods=['POST'])
 def upload():
-    """Upload a PDF/TXT, extract text, add to FAISS store."""
     if 'file' not in request.files:
-        return 'no file part', 400
+        return jsonify({"error": "No file uploaded"}), 400
+
     f = request.files['file']
     if f.filename == '':
-        return 'no selected file', 400
-    filename = f.filename
-    content = f.read()
-    text = extract_text_from_file(content, filename)
+        return jsonify({"error": "Empty filename"}), 400
+
+    text = extract_text_from_file(f.read(), f.filename)
     if not text:
-        return 'failed to extract text', 400
-    doc = store.add_document(filename, text)
-    # No need to rebuild chain_obj because our retriever delegates to store.search directly.
-    return jsonify({"status": "ok", "doc_id": doc["doc_id"], "n_chunks": len(doc["chunks"])})
+        return jsonify({"error": "Failed to extract text"}), 400
+
+    doc = store.add_document(f.filename, text)
+
+    return jsonify({
+        "status": "ok",
+        "doc_id": doc["doc_id"],
+        "n_chunks": len(doc["chunks"])
+    })
 
 
 @app.route('/docs', methods=['GET'])
@@ -118,41 +202,39 @@ def query():
     if not question:
         return jsonify({"error": "Question is required"}), 400
 
-    results = store.search(question, top_k=6)
+    # 🔍 Step 1: search FAISS with scores
+    results = store.search(question, top_k=8)
 
-    # -----------------------------
-    # ANSWER SYNTHESIS (IMPORTANT)
-    # -----------------------------
-    def clean_text(text):
-        return (
-            text.replace("�", "")
-                .replace("\n", " ")
-                .strip()
-        )
+    if not results:
+        return jsonify({
+            "final_answer": "Not found in the document.",
+            "results": []
+        })
 
-    final_answer = ""
+    # 🧠 Step 2: filter by similarity score
+   # 🧠 Step 2: collect context (NO harsh score cutoff)
+    context_chunks = []
+    seen = set()
 
-    if results:
-        # Take top 3 chunks
-        top_chunks = results[:3]
+    for r in results:
+        text = r["text"].strip()
+        norm = " ".join(text.split())
 
-        cleaned_paragraphs = [
-            clean_text(chunk["text"])
-            for chunk in top_chunks
-            if chunk.get("text")
-        ]
+        if norm not in seen:
+            seen.add(norm)
+            context_chunks.append(text)
 
-        final_answer = (
-            "The document states that some services have additional age requirements. "
-            "Users who do not meet the required age must have permission from a parent "
-            "or legal guardian, who is responsible for the child’s activity on the services.\n\n"
-            "Relevant context from the document:\n\n- "
-            + "\n- ".join(cleaned_paragraphs)
-        )
+    if not context_chunks:
+        return jsonify({
+            "final_answer": "Not found in the document.",
+            "results": results
+        })
 
+
+    # 🤖 Step 3: ask Groq
+    final_answer = generate_answer_with_groq(question, context_chunks)
 
     return jsonify({
-        "question": question,
         "final_answer": final_answer,
         "results": results
     })
@@ -188,6 +270,8 @@ def pdf_diff():
         "summary": compare_result.get("summary"),
         "highlights": highlights
     })
+
+
 
 
 @app.route('/rag_query', methods=['POST'])
@@ -289,6 +373,7 @@ def rag_query():
         "grounded_fallback": grounded_fallback
     }
     return jsonify(response)
+
 
 
 if __name__ == '__main__':
