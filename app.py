@@ -4,6 +4,7 @@ import os
 import requests
 import google.generativeai as genai
 # from openai import OpenAI
+from pdf_diff import build_pdf_diff_highlights
 from utils import extract_text_from_file
 from store_faiss import FaissStore
 from langchain_integration import build_chain_from_store, run_chain
