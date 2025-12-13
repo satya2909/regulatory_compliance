@@ -1,26 +1,34 @@
 import io
 import pdfplumber
 import re
+from docx import Document
 
-def extract_text_from_file(content_bytes, filename):
-    # Try pdfplumber for PDFs; otherwise attempt to decode as utf-8 text.
-    if filename.lower().endswith('.pdf'):
-        try:
-            with pdfplumber.open(io.BytesIO(content_bytes)) as pdf:
-                pages = [p.extract_text() or '' for p in pdf.pages]
-                text = '\n'.join(pages)
-                return text
-        except Exception as e:
-            print('pdfplumber failed:', e)
-            try:
-                return content_bytes.decode('utf-8', errors='ignore')
-            except:
-                return ''
+def extract_text_from_file(file_bytes: bytes, filename: str) -> str:
+    filename = filename.lower()
+
+    if filename.endswith(".pdf"):
+        text = []
+        with pdfplumber.open(io.BytesIO(file_bytes)) as pdf:
+            for page in pdf.pages:
+                page_text = page.extract_text()
+                if page_text:
+                    text.append(page_text)
+        return "\n".join(text)
+
+    elif filename.endswith(".txt"):
+        return file_bytes.decode("utf-8", errors="ignore")
+
+    elif filename.endswith(".docx"):
+        doc = Document(io.BytesIO(file_bytes))
+        return "\n".join([p.text for p in doc.paragraphs])
+
+    elif filename.endswith(".doc"):
+        raise ValueError(
+            "Legacy .doc files are not supported. Please upload .docx or PDF."
+        )
+
     else:
-        try:
-            return content_bytes.decode('utf-8', errors='ignore')
-        except:
-            return ''
+        raise ValueError("Unsupported file format")
 
 def chunk_text(text, chunk_size=800, overlap=150):
     # Basic chunker: splits on paragraphs and then by token approximations (characters)
