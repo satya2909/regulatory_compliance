@@ -17,11 +17,40 @@ Usage:
 import os
 from typing import List, Dict, Any, Optional
 
+<<<<<<< HEAD
 # ---- LangChain imports (latest stable paths) ----
 from langchain.chains import RetrievalQA
 from langchain.prompts import PromptTemplate
 from langchain.schema import Document, BaseRetriever
 from langchain_google_genai import ChatGoogleGenerativeAI
+=======
+# LangChain imports (robust across versions)
+try:
+    from langchain.chains.retrieval_qa.base import RetrievalQA
+    from langchain.prompts import PromptTemplate
+    from langchain.schema import Document
+    # Prefer ChatOpenAI from langchain.chat_models, fallback to langchain_openai or classic OpenAI
+    try:
+        from langchain.chat_models import ChatOpenAI
+    except Exception:
+        try:
+            # some installations provide a separate package `langchain-openai`
+            from langchain_openai.chat_models import ChatOpenAI  # type: ignore
+        except Exception:
+            # final fallback: classic OpenAI wrapper
+            from langchain.llms import OpenAI as ChatOpenAI  # type: ignore
+    # BaseLanguageModel for typing
+    try:
+        from langchain.base_language import BaseLanguageModel
+    except Exception:
+        # older/newer versions might have alternate path
+        from langchain.schema import BaseLanguageModel  # type: ignore
+except Exception as e:
+    raise ImportError(
+        "Please install langchain and the OpenAI integration (pip install langchain langchain-openai) "
+        "or check your langchain installation."
+    ) from e
+>>>>>>> c8bf6af5d1e8cc12d6f578b02456f54f40e8276e
 
 # ------------------------------------------------
 
