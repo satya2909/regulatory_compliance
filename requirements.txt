@@ -1,8 +1,28 @@
-Flask>=2.0
-python-multipart>=0.0.5
-pdfplumber>=0.7.5
-scikit-learn>=1.0
-werkzeug>=2.0
-sentence-transformers>=2.2.2
-numpy>=1.21
-google-generative-ai  
+# ----------------------------
+# Backend & Utilities (pip)
+# ----------------------------
+Flask==3.0.2
+Werkzeug==3.0.1
+python-multipart==0.0.9
+requests==2.31.0
+python-dotenv==1.0.1
+
+# ----------------------------
+# PDF processing
+# ----------------------------
+pdfplumber==0.11.0
+PyPDF2==3.0.1
+
+# ----------------------------
+# LangChain ecosystem (compatible set)
+# ----------------------------
+# LangChain ecosystem (compatible set)
+langchain==0.1.8
+langchain-community==0.0.21
+langsmith 
+langchain-openai==0.0.8
+
+# ----------------------------
+# UI
+# ----------------------------
+streamlit==1.32.0

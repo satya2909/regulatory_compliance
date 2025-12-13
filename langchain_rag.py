@@ -23,7 +23,7 @@ import os
 
 # LangChain imports
 try:
-    from langchain.chains import RetrievalQA
+    from langchain.chains.retrieval_qa.base import RetrievalQA
     from langchain.prompts import PromptTemplate
     from langchain.vectorstores import FAISS
     from langchain.embeddings import HuggingFaceEmbeddings

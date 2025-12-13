@@ -19,7 +19,7 @@ from typing import List, Dict, Any, Optional
 
 # LangChain imports
 try:
-    from langchain.chains import RetrievalQA
+    from langchain.chains.retrieval_qa.base import RetrievalQA
     from langchain.prompts import PromptTemplate
     from langchain.schema import Document
     # LLM wrappers

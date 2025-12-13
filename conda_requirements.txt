@@ -1,0 +1,9 @@
+# Heavy binary dependencies (installed via conda-forge)
+
+faiss-cpu
+numpy
+scikit-learn
+pytorch
+sentence-transformers
+transformers
+tiktoken
