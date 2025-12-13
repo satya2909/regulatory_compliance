@@ -1,18 +1,17 @@
-# langchain_full_integration.py
 """
-Full LangChain integration using your existing FaissStore (or any store with `search(query, top_k)`).
-This avoids recomputing embeddings and uses the store's search results as the retrieval layer.
+Full LangChain integration using Gemini (Google Generative AI)
+with your existing FaissStore (or any store with `search(query, top_k)`).
+
+Key properties:
+- No re-embedding (uses store.search)
+- Gemini-only (no OpenAI clutter)
+- Grounded fallback if GOOGLE_API_KEY is missing
+- Compatible with latest LangChain APIs
 
 Usage:
     from langchain_full_integration import build_chain_from_store, run_chain
-    chain = build_chain_from_store(store)   # store = FaissStore() or similar
-    out = run_chain(chain, "What are KYC requirements?", top_k=6)
-    print(out)
-
-Notes:
-- Requires `langchain` installed.
-- By default, selects OpenAI Chat models if OPENAI_API_KEY is set. If not set, run_chain will return a grounded fallback using the retrieved context (no hallucination).
-- This module tries multiple import locations for ChatOpenAI to be resilient across LangChain packaging variants.
+    chain_obj = build_chain_from_store(store)
+    out = run_chain(chain_obj, "What are KYC requirements?", top_k=6)
 """
 
 import os
@@ -48,9 +47,18 @@ except Exception as e:
         "or check your langchain installation."
     ) from e
 
-# Default prompt
-_PROMPT_TEMPLATE = """You are a regulatory compliance assistant. Use ONLY the provided context below to answer the user's question.
-Cite sources inline in the form [title | chunk_id]. If information is not present in the context, respond: "No supporting text found in the provided documents."
+# ------------------------------------------------
+
+# -------- Prompt Template (grounded & citation-safe) --------
+_PROMPT_TEMPLATE = """You are a regulatory compliance assistant.
+Use ONLY the provided context below to answer the user's question.
+
+Rules:
+- Do NOT use any outside knowledge.
+- Every factual statement must be supported by the context.
+- Cite sources inline as [title | chunk_id].
+- If the answer is not found in the context, respond exactly:
+  "No supporting text found in the provided documents."
 
 CONTEXT:
 {context}
@@ -58,40 +66,49 @@ CONTEXT:
 Question:
 {question}
 
-Answer:"""
+Answer:
+"""
 
-prompt_template = PromptTemplate(template=_PROMPT_TEMPLATE, input_variables=["context", "question"])
+prompt_template = PromptTemplate(
+    template=_PROMPT_TEMPLATE,
+    input_variables=["context", "question"]
+)
+
+# ------------------------------------------------------------
 
 
 class StoreRetriever(BaseRetriever):
     """
-    Adapter that implements LangChain's retriever interface by delegating to your store.search(query, top_k).
-    It returns langchain.schema.Document objects.
+    LangChain Retriever adapter that delegates retrieval
+    to your existing store.search(query, top_k).
     """
-    def __init__(self, store, k: int = 6):
+
+    def __init__(self, store, default_k: int = 6):
         self.store = store
-        self.k = k
+        self.default_k = default_k
 
-    def get_relevant_documents(self, query: str):
-        return self._get_relevant_documents(query)
+    def get_relevant_documents(self, query: str) -> List[Document]:
+        try:
+            hits = self.store.search(query, top_k=self.default_k) or []
+        except Exception:
+            hits = []
 
-    def _get_relevant_documents(self, query: str):
-        results = self.store.search(query, top_k=self.k)
-
-        docs = []
-        for r in results:
-            docs.append(
-                Document(
-                    page_content=r["text"],
-                    metadata=r.get("metadata", {})
-                )
-            )
+        docs: List[Document] = []
+        for h in hits:
+            page_content = h.get("text") or ""
+            metadata = {
+                "doc_id": h.get("doc_id"),
+                "chunk_id": h.get("chunk_id"),
+                "title": h.get("title"),
+                "page": h.get("page"),
+                "section": h.get("section"),
+                "score": h.get("score"),
+            }
+            docs.append(Document(page_content=page_content, metadata=metadata))
         return docs
 
-    # alias to support other LangChain versions that call this method name
-    async def aget_relevant_documents(self, query: str, **kwargs):
-        return self.get_relevant_documents(query, **kwargs)
-    
+    async def aget_relevant_documents(self, query: str) -> List[Document]:
+        return self.get_relevant_documents(query)
 
 import os
 import google.generativeai as genai
@@ -122,6 +139,7 @@ class FaissStoreRetriever(BaseRetriever):
             )
         return docs
 
+# ------------------------------------------------------------
 
 class GeminiLLM(LLM):
     temperature: float = 0.0
@@ -139,77 +157,130 @@ def _get_default_llm(temperature=0.0):
     genai.configure(api_key=os.environ["GEMINI_API_KEY"])
     return GeminiLLM(temperature=temperature)
 
-
-def build_chain_from_store(store, llm = None, top_k: int = 2):
+def _get_gemini_llm(temperature: float = 0.0) -> Optional[ChatGoogleGenerativeAI]:
     """
-    Build a LangChain RetrievalQA chain that uses the StoreRetriever.
-    - store: your FaissStore (or any store implementing search(...)).
-    - llm: optional LangChain LLM (BaseLanguageModel). If None, tries to obtain default via OPENAI_API_KEY.
-    - top_k: how many docs to retrieve by default (passed to retriever at query time).
-    Returns: a dict { "chain": RetrievalQA | None, "retriever": StoreRetriever, "llm": llm_or_none }
+    Returns Gemini LLM if GOOGLE_API_KEY is set, else None.
     """
-    llm = _get_default_llm(temperature=0.0)
+    api_key = os.environ.get("GOOGLE_API_KEY")
+    if not api_key:
+        return None
 
-    retriever = FaissStoreRetriever(store=store, k=3)
-    if llm is None:
-        llm = _get_default_llm(temperature=0.0)
-    if llm is None:
-        # No LLM available — we'll still return the retriever so caller can fetch docs and perform a grounded fallback.
-        return {"chain": None, "retriever": retriever, "llm": None}
-
-    # Build RetrievalQA with our retriever. We use 'stuff' chain type (puts retrieved docs directly into prompt).
-    # Note: chain_type_kwargs accepts a 'prompt' in many LangChain versions; keep as dict wrapper.
-    qa = RetrievalQA.from_llm(
-        llm=llm,
-        retriever=retriever,
-        return_source_documents=True,
+    return ChatGoogleGenerativeAI(
+        model="gemini-1.5-pro",
+        temperature=temperature,
+        convert_system_message_to_human=True
     )
 
-    return qa
+
+# ------------------------------------------------------------
 
 
-def run_chain(chain_obj: Dict[str, Any], question: str, top_k: Optional[int] = None) -> Dict[str, Any]:
+def build_chain_from_store(store, top_k: int = 6) -> Dict[str, Any]:
     """
-    Run the chain (if built) or return a grounded fallback from the retriever results.
-    chain_obj is the dict returned by build_chain_from_store.
+    Builds a RetrievalQA chain using Gemini + StoreRetriever.
+
     Returns:
       {
-        "answer": str,
-        "source_documents": [ { "page_content": ..., "metadata": {...} } ],
-        "grounded_fallback": bool  # True if we returned concatenated context because no LLM
+        "chain": RetrievalQA | None,
+        "retriever": StoreRetriever,
+        "llm": Gemini LLM | None
       }
     """
-    retriever: StoreRetriever = chain_obj["retriever"]
-    qa = chain_obj.get("chain")
-    llm = chain_obj.get("llm")
+    retriever = StoreRetriever(store, default_k=top_k)
+    llm = _get_gemini_llm(temperature=0.0)
 
-    # fetch documents using retriever (so we can always return context if no LLM)
-    search_kwargs = {}
-    if top_k is not None:
-        search_kwargs["k"] = top_k
-    docs = retriever.get_relevant_documents(question, **search_kwargs)
-
-    # If no LLM, return grounded fallback (concatenated context)
-    if qa is None or llm is None:
+    if llm is None:
         return {
-            "answer": "LLM is not configured properly.",
-            "source_documents": []
+            "chain": None,
+            "retriever": retriever,
+            "llm": None
         }
 
+    qa_chain = RetrievalQA.from_chain_type(
+        llm=llm,
+        chain_type="stuff",
+        retriever=retriever,
+        return_source_documents=True,
+        chain_type_kwargs={"prompt": prompt_template}
+    )
 
-    # We have a chain: run it (LangChain chain expects {"query": question})
-    # Depending on LangChain version, RetrievalQA returns either 'result' or 'answer' as the top-level key.
+    return {
+        "chain": qa_chain,
+        "retriever": retriever,
+        "llm": llm
+    }
+
+
+# ------------------------------------------------------------
+
+
+def run_chain(
+    chain_obj: Dict[str, Any],
+    question: str,
+    top_k: Optional[int] = None
+) -> Dict[str, Any]:
+    """
+    Executes the RAG chain or returns a grounded fallback.
+
+    Output:
+      {
+        "answer": str,
+        "source_documents": [{page_content, metadata}],
+        "grounded_fallback": bool
+      }
+    """
+
+    retriever: StoreRetriever = chain_obj["retriever"]
+    qa = chain_obj.get("chain")
+
+    if top_k is not None:
+        retriever.default_k = top_k
+
+    docs = retriever.get_relevant_documents(question)
+
+    # ---- Grounded fallback (NO Gemini) ----
+    if qa is None:
+        if not docs:
+            return {
+                "answer": "No documents indexed.",
+                "source_documents": [],
+                "grounded_fallback": True
+            }
+
+        parts = []
+        for i, d in enumerate(docs[:8], start=1):
+            meta = d.metadata or {}
+            title = meta.get("title") or meta.get("doc_id") or f"doc_{i}"
+            chunk_id = meta.get("chunk_id") or str(i)
+            parts.append(f"[{i}] {title} | {chunk_id}\n{d.page_content}")
+
+        context = "\n---\n".join(parts)
+
+        return {
+            "answer": "[Gemini not configured — returning grounded context]\n\n" + context,
+            "source_documents": [
+                {"page_content": d.page_content, "metadata": d.metadata}
+                for d in docs
+            ],
+            "grounded_fallback": True
+        }
+
+    # ---- Gemini-powered RAG ----
     res = qa({"query": question})
-    answer = res.get("result") or res.get("answer") or ""
-    source_documents = res.get("source_documents") or res.get("source_documents", []) or []
-    # normalize to list of dicts
-    normalized = []
-    for d in source_documents:
-        try:
-            page_content = getattr(d, "page_content", None) or (d.get("page_content") if isinstance(d, dict) else "")
-            metadata = getattr(d, "metadata", None) or (d.get("metadata") if isinstance(d, dict) else {})
-        except Exception:
-            page_content = str(d)
-            metadata = {}
-        normalized.append({"page_content": page_content, "metadata": metadata})
-    return {"answer": answer, "source_documents": normalized, "grounded_fallback": False}
+
+    answer = res.get("result", "")
+    src_docs = res.get("source_documents", [])
+
+    normalized_sources = [
+        {
+            "page_content": d.page_content,
+            "metadata": d.metadata
+        }
+        for d in src_docs
+    ]
+
+    return {
+        "answer": answer,
+        "source_documents": normalized_sources,
+        "grounded_fallback": False
+    }
