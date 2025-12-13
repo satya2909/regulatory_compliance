@@ -286,8 +286,9 @@ def rag_query():
         "cited_answer": "...",
         "raw_answer": "...",
         "sources": [...],
-        "verification": { "total_sentences": N, "grounded_count": G, "sentences": [...] },
-        "grounded_fallback": False
+        "citations": [...],              # NEW (structured)
+        "verification": {...},
+        "grounded_fallback": false
       }
     """
     data = request.get_json()
@@ -299,48 +300,35 @@ def rag_query():
     threshold = float(data.get('threshold', 0.65))
     verify_top_k = int(data.get('verify_top_k', 3))
 
-    # Run the chain (returns answer + source_documents) — chain_obj was built at startup
+    # 1️⃣ Run RAG chain
     try:
         out = run_chain(chain_obj, question, top_k=top_k)
     except Exception as e:
         return jsonify({"error": "RAG chain failed", "details": str(e)}), 500
 
-    # Extract results
     raw_answer = out.get("answer", "")
     source_documents = out.get("source_documents", []) or []
     grounded_fallback = bool(out.get("grounded_fallback", False))
 
-    # Normalize LangChain Document dicts to the format verify/inject expect:
-    # each source_for_verify entry should have at least: text, title/doc_id, chunk_id, page
+    # 2️⃣ Normalize retrieved chunks
     sources_for_verify = []
     for sd in source_documents:
-        # sd is expected: {"page_content": ..., "metadata": {...}}
-        if not isinstance(sd, dict):
-            # best-effort cast
-            try:
-                page_content = getattr(sd, "page_content", None) or str(sd)
-                metadata = getattr(sd, "metadata", None) or {}
-            except Exception:
-                page_content = str(sd)
-                metadata = {}
-        else:
-            page_content = sd.get("page_content") or sd.get("text") or ""
-            metadata = sd.get("metadata") or {}
+        page_content = sd.get("page_content", "")
+        metadata = sd.get("metadata", {}) or {}
 
-        # Build the minimal chunk dict
         sources_for_verify.append({
             "text": page_content,
-            "title": metadata.get("title") or metadata.get("doc_id") or metadata.get("doc_title"),
+            "title": metadata.get("title") or metadata.get("doc_id"),
             "doc_id": metadata.get("doc_id"),
             "chunk_id": metadata.get("chunk_id"),
             "page": metadata.get("page"),
             "section": metadata.get("section"),
             "jurisdiction": metadata.get("jurisdiction"),
             "char_range": metadata.get("char_range"),
-            "metadata": metadata  # keep raw metadata for frontends
+            "metadata": metadata
         })
 
-    # Inject inline citations using the verify + cite pipeline
+    # 3️⃣ Inject citations + grounding
     try:
         cited_answer, sentence_map = inject_citations(
             raw_answer,
@@ -350,7 +338,6 @@ def rag_query():
             top_k=verify_top_k
         )
     except Exception as e:
-        # If injection fails, still return raw answer and sources with error info
         return jsonify({
             "cited_answer": raw_answer,
             "raw_answer": raw_answer,
@@ -359,21 +346,59 @@ def rag_query():
             "grounded_fallback": grounded_fallback
         }), 200
 
+    # 4️⃣ Build structured citation objects (🔥 NEW)
+    citations = []
+    citation_id = 1
+
+    for sent_idx, sent in enumerate(sentence_map):
+        if not sent.get("grounded"):
+            continue
+
+        supports = sent.get("supports", [])
+        if not supports:
+            continue
+
+        best = supports[0]
+        chunk = best.get("chunk") if isinstance(best, dict) else None
+        if not isinstance(chunk, dict):
+            continue
+
+        citations.append({
+            "citation_id": citation_id,
+            "sentence_index": sent_idx,
+            "sentence": sent.get("sentence"),
+            "doc_id": chunk.get("doc_id"),
+            "title": chunk.get("title"),
+            "chunk_id": chunk.get("chunk_id"),
+            "page": chunk.get("page"),
+            "char_range": chunk.get("char_range"),
+            "snippet": (chunk.get("text") or "")[:300]
+        })
+        citation_id += 1
+
+    # 5️⃣ Verification summary
     verify_report = {
         "total_sentences": len(sentence_map),
         "grounded_count": sum(1 for s in sentence_map if s.get("grounded")),
-        "grounding_ratio": (sum(1 for s in sentence_map if s.get("grounded")) / len(sentence_map)) if sentence_map else 0.0,
+        "grounding_ratio": (
+            sum(1 for s in sentence_map if s.get("grounded")) / len(sentence_map)
+            if sentence_map else 0.0
+        ),
         "sentences": sentence_map
     }
 
+    # 6️⃣ Final response
     response = {
         "cited_answer": cited_answer,
         "raw_answer": raw_answer,
         "sources": sources_for_verify,
+        "citations": citations,          # 👈 FRONTEND GOLD
         "verification": verify_report,
         "grounded_fallback": grounded_fallback
     }
+
     return jsonify(response)
+
 
 
 
