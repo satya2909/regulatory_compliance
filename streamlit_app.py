@@ -1,145 +1,161 @@
 import streamlit as st
 import requests
-import io
-import json
-from typing import Any, Dict, List
+import os
 
-# === CONFIG ===
-# Change this to your Flask backend address if needed:
-BACKEND_URL = st.secrets.get("BACKEND_URL", "http://192.168.144.223:7860/")
-UPLOAD_ENDPOINT = f"{BACKEND_URL}/upload"
-QUERY_ENDPOINT = f"{BACKEND_URL}/query"
-RAG_QUERY_ENDPOINT = f"{BACKEND_URL}/rag_query"
+# -----------------------------
+# Page Config
+# -----------------------------
+st.set_page_config(
+    page_title="Regulatory Compliance Assistant",
+    layout="wide"
+)
 
-st.set_page_config(page_title="Docs RAG UI", layout="wide")
+# -----------------------------
+# Backend URL (safe fallback)
+# -----------------------------
+BACKEND_URL = (
+    os.environ.get("BACKEND_URL")
+    or st.secrets.get("BACKEND_URL", "http://192.168.144.223:7860/")
+)
 
-# === Helpers ===
-def post_file_to_backend(file_bytes: bytes, filename: str) -> Dict[str, Any]:
-    files = {"file": (filename, io.BytesIO(file_bytes))}
-    resp = requests.post(UPLOAD_ENDPOINT, files=files, timeout=120)
-    resp.raise_for_status()
-    return resp.json()
+# -----------------------------
+# Title
+# -----------------------------
+st.title("📜 Regulatory Compliance Assistant")
+st.write("Upload regulatory documents and ask compliance-related questions.")
 
-def post_json(endpoint: str, payload: Dict[str, Any]) -> Dict[str, Any]:
-    resp = requests.post(endpoint, json=payload, timeout=120)
-    resp.raise_for_status()
-    return resp.json()
+# ======================================================
+# SECTION 1 — DOCUMENT UPLOAD & SETTINGS
+# ======================================================
+st.header("📂 Upload Document")
 
-def pretty_json(obj: Any) -> str:
-    return json.dumps(obj, indent=2, ensure_ascii=False)
+uploaded_file = st.file_uploader(
+    "Upload a PDF document",
+    type=["pdf"]
+)
 
-def show_sources(sources: List[Dict[str, Any]]):
-    for i, s in enumerate(sources, start=1):
-        st.markdown(f"**Source {i} — score: {s.get('score', 'N/A')}, id: {s.get('id', s.get('doc_id', ''))}**")
-        # text could be in 'page_content' or 'text' or 'content' depending on your pipeline
-        content = s.get("page_content") or s.get("text") or s.get("content")
-        if content:
-            with st.expander("Preview source text", expanded=False):
-                st.write(content[:3000] + ("..." if len(content) > 3000 else ""))
-        # show meta if present
-        meta = s.get("metadata") or s.get("meta")
-        if meta:
-            st.write("Metadata:", meta)
-        st.markdown("---")
+with st.expander("⚙️ Document Processing Settings"):
+    chunk_size = st.number_input(
+        "Chunk size",
+        min_value=200,
+        max_value=2000,
+        value=500,
+        step=100
+    )
 
+    chunk_overlap = st.number_input(
+        "Chunk overlap",
+        min_value=0,
+        max_value=500,
+        value=100,
+        step=50
+    )
 
-# === UI ===
-st.title("📚 Document Upload & RAG — Streamlit Frontend")
-st.caption("A simple UI that talks to your Flask backend (`/upload`, `/query`, `/rag_query`).")
+    top_k = st.slider(
+        "Number of chunks to retrieve (Top-K)",
+        min_value=1,
+        max_value=10,
+        value=4
+    )
 
-col1, col2 = st.columns([1, 2])
+upload_btn = st.button("📤 Upload & Index Document")
 
-with col1:
-    st.header("Upload a document")
-    uploaded_file = st.file_uploader("Choose a PDF or TXT file", type=["pdf", "txt"], accept_multiple_files=False)
-    if uploaded_file:
-        filename = uploaded_file.name
-        st.write("Filename:", filename)
-        if st.button("Upload to backend"):
+if upload_btn:
+    if uploaded_file is None:
+        st.warning("Please upload a PDF document.")
+    else:
+        with st.spinner("Uploading and indexing document..."):
             try:
-                with st.spinner("Uploading..."):
-                    result = post_file_to_backend(uploaded_file.getvalue(), filename)
-                st.success("Uploaded!")
-                st.json(result)
-                # store doc_id in session for convenience
-                if "doc_id" in result:
-                    st.session_state["doc_id"] = result["doc_id"]
-                if "n_chunks" in result:
-                    st.session_state["n_chunks"] = result["n_chunks"]
-            except Exception as e:
-                st.error(f"Upload failed: {e}")
+                files = {
+                    "file": (uploaded_file.name, uploaded_file, "application/pdf")
+                }
 
-    st.markdown("**Stored document**")
-    st.write("doc_id:", st.session_state.get("doc_id", "—"))
-    if "n_chunks" in st.session_state:
-        st.write("n_chunks:", st.session_state["n_chunks"])
+                data = {
+                    "chunk_size": chunk_size,
+                    "chunk_overlap": chunk_overlap,
+                    "top_k": top_k
+                }
 
-    st.markdown("---")
-    st.header("Simple retrieval query")
-    q_text = st.text_area("Question (simple retrieval):", value="", height=80)
-    if st.button("Ask (simple retrieval)"):
-        if not q_text.strip():
-            st.warning("Please type a question.")
-        else:
-            payload = {"question": q_text}
-            if st.session_state.get("doc_id"):
-                payload["doc_id"] = st.session_state["doc_id"]
-            try:
-                with st.spinner("Querying..."):
-                    resp = post_json(QUERY_ENDPOINT, payload)
-                st.success("Got response")
-                st.markdown("**Response JSON**")
-                st.json(resp)
-                if "sources" in resp:
-                    st.markdown("**Sources**")
-                    show_sources(resp["sources"])
-            except Exception as e:
-                st.error(f"Query failed: {e}")
+                response = requests.post(
+                    f"{BACKEND_URL}/upload",
+                    files=files,
+                    data=data,
+                    timeout=300
+                )
 
-with col2:
-    st.header("RAG (LLM-backed) query")
-    rag_q = st.text_area("Question (RAG):", value="", height=80)
-    top_k = st.slider("top_k (how many top chunks to retrieve)", min_value=1, max_value=20, value=6)
-    threshold = st.slider("threshold (score threshold 0.0–1.0)", min_value=0.0, max_value=1.0, value=0.65, step=0.01)
-    use_doc = st.checkbox("Pass doc_id to backend (if present)", value=True)
+                if response.status_code == 200:
+                    st.success("✅ Document uploaded and indexed successfully.")
+                else:
+                    st.error("❌ Failed to process document.")
 
-    if st.button("Ask (RAG)"):
-        if not rag_q.strip():
-            st.warning("Please type a question.")
-        else:
-            payload = {"question": rag_q, "top_k": top_k, "threshold": threshold}
-            if use_doc and st.session_state.get("doc_id"):
-                payload["doc_id"] = st.session_state["doc_id"]
-            try:
-                with st.spinner("Running RAG... (may take a few seconds)"):
-                    resp = post_json(RAG_QUERY_ENDPOINT, payload)
-                st.success("RAG finished")
-                st.markdown("**Response JSON**")
-                st.json(resp)
-                # Many RAG endpoints return 'answer' and 'source_documents' or 'sources'
-                answer = resp.get("answer") or resp.get("result") or resp.get("response") or resp.get("output")
+            except requests.exceptions.RequestException as e:
+                st.error("❌ Could not connect to backend.")
+                st.caption(str(e))
+# ======================================================
+# SECTION 2 — QUESTION ANSWERING
+# ======================================================
+st.header("❓ Ask a Question")
+
+question = st.text_input(
+    "Enter your question",
+    placeholder="e.g., What are the age requirements mentioned in the document?"
+)
+
+ask_btn = st.button("🔍 Get Answer")
+
+if ask_btn and question.strip():
+    with st.spinner("Generating answer..."):
+        try:
+            response = requests.post(
+                f"{BACKEND_URL}/query",
+                json={"question": question},
+                timeout=120
+            )
+
+            if response.status_code != 200:
+                st.error("❌ Backend error while answering the question.")
+            else:
+                result = response.json()
+                with st.expander("🛠 Debug: Raw backend response"):
+                    st.json(result)
+
+
+                # -----------------------------
+                # Resolve answer priority
+                # -----------------------------
+                answer = (
+                    result.get("final_answer")
+                    or result.get("cited_answer")
+                    or result.get("raw_answer")
+                )
+
+                st.subheader("✅ Answer")
+
                 if answer:
-                    st.markdown("### ✅ Answer")
                     st.write(answer)
-                # Show sources if present
-                sources = resp.get("source_documents") or resp.get("sources") or resp.get("source_docs")
+                else:
+                    st.warning("No answer generated by the model.")
+
+                # -----------------------------
+                # Sources (optional)
+                # -----------------------------
+                sources = result.get("sources", [])
                 if sources:
-                    st.markdown("### 📎 Source documents")
-                    show_sources(sources)
-            except Exception as e:
-                st.error(f"RAG query failed: {e}")
+                    with st.expander("📎 Source Documents"):
+                        for i, src in enumerate(sources, 1):
+                            meta = src.get("metadata", {})
+                            st.markdown(
+                                f"**{i}. {meta.get('title', 'Unknown document')}**  \n"
+                                f"`Chunk ID:` {meta.get('chunk_id', 'N/A')}  \n"
+                                f"`Score:` {meta.get('score', 'N/A')}"
+                            )
 
+        except requests.exceptions.RequestException as e:
+            st.error("❌ Could not connect to backend.")
+            st.caption(str(e))
+
+# ======================================================
+# Footer
+# ======================================================
 st.markdown("---")
-st.header("Backend diagnostics")
-st.write("Current BACKEND_URL:", BACKEND_URL)
-if st.button("Ping backend"):
-    try:
-        r = requests.get(BACKEND_URL, timeout=10)
-        st.write("Status:", r.status_code)
-        # show text/html homepage
-        st.text(r.text[:5000])
-    except Exception as e:
-        st.error(f"Ping failed: {e}")
-
-st.markdown("**Raw endpoints used**")
-st.code(f"UPLOAD -> {UPLOAD_ENDPOINT}\nQUERY -> {QUERY_ENDPOINT}\nRAG -> {RAG_QUERY_ENDPOINT}")
+st.caption("Powered by Gemini Pro · LangChain · FAISS · Streamlit")

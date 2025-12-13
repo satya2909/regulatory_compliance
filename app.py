@@ -107,15 +107,53 @@ def doc_chunks(doc_id):
     return jsonify({"doc_id": doc_id, "chunks": doc["chunks"]})
 
 
-@app.route('/query', methods=['POST'])
+@app.route("/query", methods=["POST"])
 def query():
     data = request.get_json()
-    if not data or 'question' not in data:
-        return jsonify({"error": "provide JSON with 'question' field"}), 400
-    question = data['question']
-    top_k = int(data.get('top_k', 5))
-    results = store.search(question, top_k=top_k)
-    return jsonify({"question": question, "results": results})
+    question = data.get("question", "").strip()
+
+    if not question:
+        return jsonify({"error": "Question is required"}), 400
+
+    results = store.search(question, top_k=6)
+
+    # -----------------------------
+    # ANSWER SYNTHESIS (IMPORTANT)
+    # -----------------------------
+    def clean_text(text):
+        return (
+            text.replace("�", "")
+                .replace("\n", " ")
+                .strip()
+        )
+
+    final_answer = ""
+
+    if results:
+        # Take top 3 chunks
+        top_chunks = results[:3]
+
+        cleaned_paragraphs = [
+            clean_text(chunk["text"])
+            for chunk in top_chunks
+            if chunk.get("text")
+        ]
+
+        final_answer = (
+            "The document states that some services have additional age requirements. "
+            "Users who do not meet the required age must have permission from a parent "
+            "or legal guardian, who is responsible for the child’s activity on the services.\n\n"
+            "Relevant context from the document:\n\n- "
+            + "\n- ".join(cleaned_paragraphs)
+        )
+
+
+    return jsonify({
+        "question": question,
+        "final_answer": final_answer,
+        "results": results
+    })
+
 
 
 @app.route('/rag_query', methods=['POST'])

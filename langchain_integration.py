@@ -17,19 +17,22 @@ Notes:
 
 import os
 from typing import List, Dict, Any, Optional
+# from store_faiss import FaissStore
 
 # LangChain imports (robust across versions)
 try:
     from langchain.chains.retrieval_qa.base import RetrievalQA
     from langchain.prompts import PromptTemplate
-    from langchain.schema import Document
+    # from langchain.retrievers.base import BaseRetriever
+    from langchain.schema import BaseRetriever,Document
+
     # Prefer ChatOpenAI from langchain.chat_models, fallback to langchain_openai or classic OpenAI
     try:
-        from langchain.chat_models import ChatOpenAI
+        from langchain_google_genai import ChatGoogleGenerativeAI
     except Exception:
         try:
             # some installations provide a separate package `langchain-openai`
-            from langchain_openai.chat_models import ChatOpenAI  # type: ignore
+            from langchain_google_genai import ChatGoogleGenerativeAI  # type: ignore
         except Exception:
             # final fallback: classic OpenAI wrapper
             from langchain.llms import OpenAI as ChatOpenAI  # type: ignore
@@ -60,71 +63,84 @@ Answer:"""
 prompt_template = PromptTemplate(template=_PROMPT_TEMPLATE, input_variables=["context", "question"])
 
 
-class StoreRetriever:
+class StoreRetriever(BaseRetriever):
     """
     Adapter that implements LangChain's retriever interface by delegating to your store.search(query, top_k).
     It returns langchain.schema.Document objects.
     """
-    def __init__(self, store, default_k: int = 6):
-        """
-        store: object implementing `search(query, top_k)` -> list[dict]
-               and ideally chunk metadata as returned by your store (doc_id, chunk_id, text, score).
-        """
+    def __init__(self, store, k: int = 6):
         self.store = store
-        self.default_k = default_k
+        self.k = k
 
-    def get_relevant_documents(self, query: str, **kwargs) -> List[Document]:
-        """
-        LangChain calls this method to get documents. We accept search kwargs: top_k or k.
-        """
-        top_k = int(kwargs.get("k") or kwargs.get("top_k") or self.default_k)
-        # delegate to store.search
-        hits = []
-        try:
-            hits = self.store.search(query, top_k=top_k) or []
-        except Exception:
-            hits = []
+    def get_relevant_documents(self, query: str):
+        return self._get_relevant_documents(query)
 
-        docs: List[Document] = []
-        for h in hits:
-            # hit expected keys: 'text' (or 'page_content'), 'score', 'doc_id', 'chunk_id', 'title', ...
-            page_content = h.get("text") or h.get("page_content") or ""
-            metadata = {}
-            # normalize metadata if available
-            if "metadata" in h and isinstance(h["metadata"], dict):
-                metadata = h["metadata"]
-            else:
-                # attach store-level metadata if present
-                for k in ("doc_id", "chunk_id", "title", "score", "page", "section"):
-                    if k in h:
-                        metadata[k] = h[k]
-            docs.append(Document(page_content=page_content, metadata=metadata))
+    def _get_relevant_documents(self, query: str):
+        results = self.store.search(query, top_k=self.k)
+
+        docs = []
+        for r in results:
+            docs.append(
+                Document(
+                    page_content=r["text"],
+                    metadata=r.get("metadata", {})
+                )
+            )
         return docs
 
     # alias to support other LangChain versions that call this method name
     async def aget_relevant_documents(self, query: str, **kwargs):
         return self.get_relevant_documents(query, **kwargs)
+    
+
+import os
+import google.generativeai as genai
+from langchain.llms.base import LLM
+from typing import List
+from langchain.schema import BaseRetriever,Document
+# from langchain.retrievers import BaseRetriever
+
+class FaissStoreRetriever(BaseRetriever):
+    store: object
+    k: int = 5
+
+    def _get_relevant_documents(self, query: str) -> List[Document]:
+        results = self.store.search(query, top_k=self.k)
+
+        docs = []
+        for r in results:
+            docs.append(
+                Document(
+                    page_content=r["text"],
+                    metadata={
+                        "doc_id": r["doc_id"],
+                        "title": r.get("title", ""),
+                        "chunk_id": r.get("chunk_id"),
+                        "score": r.get("score"),
+                    },
+                )
+            )
+        return docs
 
 
-def _get_default_llm(temperature: float = 0.0) -> Optional[BaseLanguageModel]:
-    """
-    Return a LangChain LLM if environment configured (OpenAI), otherwise None.
-    """
-    openai_key = os.environ.get("OPENAI_API_KEY", "") or os.environ.get("OPENAI_API_KEY".lower(), "")
-    if openai_key:
-        try:
-            # ChatOpenAI wrapper will pick model via OPENAI_API_KEY / env or default
-            return ChatOpenAI(temperature=temperature)
-        except Exception:
-            try:
-                from langchain.llms import OpenAI
-                return OpenAI(temperature=temperature)
-            except Exception:
-                return None
-    return None
+class GeminiLLM(LLM):
+    temperature: float = 0.0
+
+    @property
+    def _llm_type(self):
+        return "gemini"
+
+    def _call(self, prompt, stop=None):
+        model = genai.GenerativeModel("gemini-pro")
+        response = model.generate_content(prompt)
+        return response.text
+
+def _get_default_llm(temperature=0.0):
+    genai.configure(api_key=os.environ["GEMINI_API_KEY"])
+    return GeminiLLM(temperature=temperature)
 
 
-def build_chain_from_store(store, llm: Optional[BaseLanguageModel] = None, top_k: int = 6):
+def build_chain_from_store(store, llm = None, top_k: int = 2):
     """
     Build a LangChain RetrievalQA chain that uses the StoreRetriever.
     - store: your FaissStore (or any store implementing search(...)).
@@ -132,7 +148,9 @@ def build_chain_from_store(store, llm: Optional[BaseLanguageModel] = None, top_k
     - top_k: how many docs to retrieve by default (passed to retriever at query time).
     Returns: a dict { "chain": RetrievalQA | None, "retriever": StoreRetriever, "llm": llm_or_none }
     """
-    retriever = StoreRetriever(store, default_k=top_k)
+    llm = _get_default_llm(temperature=0.0)
+
+    retriever = FaissStoreRetriever(store=store, k=3)
     if llm is None:
         llm = _get_default_llm(temperature=0.0)
     if llm is None:
@@ -141,8 +159,13 @@ def build_chain_from_store(store, llm: Optional[BaseLanguageModel] = None, top_k
 
     # Build RetrievalQA with our retriever. We use 'stuff' chain type (puts retrieved docs directly into prompt).
     # Note: chain_type_kwargs accepts a 'prompt' in many LangChain versions; keep as dict wrapper.
-    qa = RetrievalQA.from_chain_type(llm=llm, chain_type="stuff", retriever=retriever, return_source_documents=True, chain_type_kwargs={"prompt": prompt_template})
-    return {"chain": qa, "retriever": retriever, "llm": llm}
+    qa = RetrievalQA.from_llm(
+        llm=llm,
+        retriever=retriever,
+        return_source_documents=True,
+    )
+
+    return qa
 
 
 def run_chain(chain_obj: Dict[str, Any], question: str, top_k: Optional[int] = None) -> Dict[str, Any]:
@@ -168,21 +191,11 @@ def run_chain(chain_obj: Dict[str, Any], question: str, top_k: Optional[int] = N
 
     # If no LLM, return grounded fallback (concatenated context)
     if qa is None or llm is None:
-        # create grounded fallback
-        if not docs:
-            return {"answer": "No documents indexed.", "source_documents": [], "grounded_fallback": True}
-        # concatenate a limited amount of context to keep prompt size reasonable
-        parts = []
-        for i, d in enumerate(docs, start=1):
-            meta = d.metadata or {}
-            title = meta.get("title") or meta.get("doc_id") or f"doc_{i}"
-            chunk_id = meta.get("chunk_id") or meta.get("id") or str(i)
-            parts.append(f"[{i}] {title} | {chunk_id}\n{d.page_content}")
-        context = "\n---\n".join(parts[:10])  # cap number of chunks in fallback
-        answer = "[LLM not configured — returning concatenated context as grounded answer]\n\n" + context
-        # normalize docs into simple dicts
-        srcs = [{"page_content": d.page_content, "metadata": d.metadata} for d in docs]
-        return {"answer": answer, "source_documents": srcs, "grounded_fallback": True}
+        return {
+            "answer": "LLM is not configured properly.",
+            "source_documents": []
+        }
+
 
     # We have a chain: run it (LangChain chain expects {"query": question})
     # Depending on LangChain version, RetrievalQA returns either 'result' or 'answer' as the top-level key.
