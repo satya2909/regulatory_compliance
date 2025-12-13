@@ -1,0 +1,10 @@
+<rail version="0.1">
+  <output>
+    <object name="response">
+      <string name="answer"
+              description="Final YES/NO answer with brief explanation based only on context" />
+      <boolean name="from_document"
+               description="True if answer is grounded in document context, else false" />
+    </object>
+  </output>
+</rail>
