@@ -17,13 +17,6 @@ Usage:
 import os
 from typing import List, Dict, Any, Optional
 
-<<<<<<< HEAD
-# ---- LangChain imports (latest stable paths) ----
-from langchain.chains import RetrievalQA
-from langchain.prompts import PromptTemplate
-from langchain.schema import Document, BaseRetriever
-from langchain_google_genai import ChatGoogleGenerativeAI
-=======
 # LangChain imports (robust across versions)
 try:
     from langchain.chains.retrieval_qa.base import RetrievalQA
@@ -50,7 +43,7 @@ except Exception as e:
         "Please install langchain and the OpenAI integration (pip install langchain langchain-openai) "
         "or check your langchain installation."
     ) from e
->>>>>>> c8bf6af5d1e8cc12d6f578b02456f54f40e8276e
+
 
 # ------------------------------------------------
 
